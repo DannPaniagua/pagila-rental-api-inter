@@ -113,3 +113,50 @@ def return_rental(rental_id: int):
             raise HTTPException(status_code=500, detail=f"Error de base de datos: {str(e)}")
         except Exception as e:
             raise HTTPException(status_code=500, detail=f"Error interno: {str(e)}")
+
+@app.post("/payments")
+def create_payment(payment: PaymentData):
+    for attempt in range(MAX_RETRIES):
+        try:
+            with engine.connect() as conn:
+                with conn.begin():
+                    if payment.rental_id is not None:
+                        check_query = text("""
+                            SELECT customer_id FROM rental 
+                            WHERE rental_id = :rent_id;
+                        """)
+                        renta = conn.execute(check_query, {"rent_id": payment.rental_id}).fetchone()
+
+                        if not renta:
+                            raise HTTPException(status_code=404, detail=f"La renta {payment.rental_id} no existe.")
+                        
+                        if renta.customer_id != payment.customer_id:
+                            raise HTTPException(
+                                status_code=403, 
+                                detail="Prohibido: Esta renta pertenece a otro cliente. No puedes pagarla."
+                            )
+
+                    insert_query = text("""
+                        INSERT INTO payment (customer_id, staff_id, rental_id, amount, payment_date)
+                        VALUES (:cust_id, :staff_id, :rent_id, :amount, NOW()) RETURNING payment_id;
+                    """)
+                    
+                    nuevo_payment_id = conn.execute(insert_query, {
+                        "cust_id": payment.customer_id,
+                        "staff_id": payment.staff_id,
+                        "rent_id": payment.rental_id,
+                        "amount": payment.amount
+                    }).scalar()
+
+                    return {"mensaje": "Pago registrado exitosamente", "payment_id": nuevo_payment_id}
+
+        except HTTPException:
+            raise
+        except SQLAlchemyError as e:
+            error_code = getattr(e.orig, "pgcode", None) if hasattr(e, "orig") else None
+            if error_code in ("40001", "40P01") and attempt < MAX_RETRIES - 1:
+                time.sleep(BASE_BACKOFF * (2 ** attempt))
+                continue
+            raise HTTPException(status_code=500, detail=f"Error de base de datos: {str(e)}")
+        except Exception as e:
+            raise HTTPException(status_code=500, detail=f"Error interno: {str(e)}")
